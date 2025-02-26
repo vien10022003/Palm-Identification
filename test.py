@@ -120,13 +120,65 @@ def recognize_palm(image, model):
         if score < best_score:  # Chọn người có khoảng cách nhỏ nhất
             best_score = score
             best_match = person
-            print(f"best_score: {best_score}")
-            print(f"best_match: {person}")
-
+            
+    print(f"best_score: {100-best_score*100}")
+    print(f"best_match: {person}")
     return best_match if best_score < 0.4 else "Unknown"
 
 
+def crop_hand_square(frame, hand_landmarks, w, h):
+    # Lấy điểm chân ngón trỏ, chân ngón út và cổ tay
+    wrist = hand_landmarks.landmark[0]  # Cổ tay
+    index_base = hand_landmarks.landmark[5]  # Chân ngón trỏ
+    pinky_base = hand_landmarks.landmark[17]  # Chân ngón út
 
+    # Chuyển đổi tọa độ từ normalized (0-1) sang pixel
+    x1, y1 = int(index_base.x * w), int(index_base.y * h)
+    x2, y2 = int(pinky_base.x * w), int(pinky_base.y * h)
+    x_wrist, y_wrist = int(wrist.x * w), int(wrist.y * h)
+
+    # Tính độ dài cạnh hình vuông
+    side_length = int(np.linalg.norm([x2 - x1, y2 - y1]))  
+
+    # Tính vector hướng từ ngón trỏ đến ngón út
+    dx, dy = x2 - x1, y2 - y1
+
+    # Tính vector vuông góc
+    perp_dx, perp_dy = -dy, dx  
+
+    # Kiểm tra hướng của cổ tay để xác định chiều vuông góc đúng
+    wrist_side = (x_wrist - x1) * dy - (y_wrist - y1) * dx  # Tích chéo
+    if wrist_side >= 0:
+        perp_dx, perp_dy = -perp_dx, -perp_dy  # Đảo hướng nếu cần
+
+    # Chuẩn hóa vector để có độ dài bằng side_length
+    norm_factor = side_length / np.linalg.norm([perp_dx, perp_dy])
+    perp_dx, perp_dy = int(perp_dx * norm_factor), int(perp_dy * norm_factor)
+
+    # Tính 4 điểm của hình vuông
+    pts_src = np.array([
+        [x1, y1],  # Điểm 1: Chân ngón trỏ
+        [x2, y2],  # Điểm 2: Chân ngón út
+        [x2 + perp_dx, y2 + perp_dy],  # Điểm 3: Kéo vuông góc đúng hướng
+        [x1 + perp_dx, y1 + perp_dy]   # Điểm 4: Kéo vuông góc đúng hướng
+    ], dtype=np.float32)
+    
+    # Tạo điểm đích (hình vuông chuẩn hóa)
+    pts_dst = np.array([
+        [0, 0], [side_length, 0], [side_length, side_length], [0, side_length]
+    ], dtype=np.float32)
+
+    # Tính toán ma trận biến đổi phối cảnh
+    matrix = cv2.getPerspectiveTransform(pts_src, pts_dst)
+
+    # Cắt ảnh theo hình vuông đã xoay
+    palm_crop = cv2.warpPerspective(frame, matrix, (side_length, side_length))
+
+    # Vẽ hình vuông lên ảnh gốc (debug)
+    cv2.polylines(frame, [pts_src.astype(np.int32)], isClosed=True, color=(0, 255, 0), thickness=2)
+
+    cv2.imshow("Palm Rotated", palm_crop)
+    return palm_crop, frame
 
 # Khởi tạo mô hình nhận diện bàn tay của MediaPipe
 mp_hands = mp.solutions.hands
@@ -134,9 +186,6 @@ mp_drawing = mp.solutions.drawing_utils
 
 # Mở camera
 cap = cv2.VideoCapture(0)
-
-score = cosine([1], [1])
-print(f"test cosine: {score}")
         
 with mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5) as hands:
     while cap.isOpened():
@@ -156,39 +205,8 @@ with mp_hands.Hands(min_detection_confidence=0.5, min_tracking_confidence=0.5) a
 
         if results.multi_hand_landmarks:
             for hand_landmarks in results.multi_hand_landmarks:
-                # Lấy danh sách các điểm landmark quan trọng
-                palm_landmarks = [hand_landmarks.landmark[i] for i in [0, 1,5,  9, 13, 17]]
-
-                # Tìm tọa độ min/max để tạo bounding box
-                x_min, y_min = w, h
-                x_max, y_max = 0, 0
                 
-                for landmark in palm_landmarks:
-                    x, y = int(landmark.x * w), int(landmark.y * h)
-                    x_min = min(x, x_min)
-                    y_min = min(y, y_min)
-                    x_max = max(x, x_max)
-                    y_max = max(y, y_max)
-
-                # Lấy tâm bàn tay (trung bình các điểm lòng bàn tay)
-                center_x = sum([int(l.x * w) for l in palm_landmarks]) // len(palm_landmarks)
-
-                # Điều chỉnh vùng cắt để không bị lệch về hai bên
-                left_padding = (center_x - x_min)  # Mở rộng hơn về phía lòng bàn tay
-                right_padding = (x_max - center_x)  # Thu hẹp biên dư thừa
-                
-                x_min = max(0, int(center_x - left_padding))
-                x_max = min(w, int(center_x + right_padding))
-
-                y_min = max(0, y_min)
-                y_max = min(h, y_max)
-                y_max = int((y_max - y_min) *0.8+y_min)
-
-                # Vẽ khung quanh vùng cắt để debug
-                cv2.rectangle(frame, (x_min, y_min), (x_max, y_max), (0, 255, 0), 2)
-
-                # Cắt ảnh theo vùng lòng bàn tay
-                palm_crop = frame[y_min:y_max, x_min:x_max]
+                palm_crop, frame_debug = crop_hand_square(frame, hand_landmarks, w, h)
 
                 if cv2.waitKey(1) & 0xFF == ord('e'):
                     if palm_crop.shape[0] > 0 and palm_crop.shape[1] > 0:
